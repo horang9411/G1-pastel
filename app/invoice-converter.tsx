@@ -4,7 +4,6 @@ import {
   ChangeEvent,
   DragEvent,
   useCallback,
-  useEffect,
   useRef,
   useState,
 } from "react";
@@ -372,7 +371,6 @@ async function convertWorkbook(file: File): Promise<ConversionResult> {
     .slice(1)
     .filter((row) => row.some((cell) => textValue(cell) !== ""))
     .map((row) => {
-      const option = textValue(row[indexOf("옵션")]);
       return {
         orderNumber: outputValue(row[indexOf("주문번호")]),
         productCode: outputValue(row[indexOf("상품번호")]),
@@ -380,7 +378,7 @@ async function convertWorkbook(file: File): Promise<ConversionResult> {
         recipientName: textValue(row[indexOf("수령인명")]),
         buyerName: textValue(row[indexOf("구매자명")]),
         quantity: Number(row[indexOf("수량")]) || 0,
-        itemName: option && option !== "67" ? option : "76",
+        itemName: textValue(row[indexOf("옵션")]),
         recipientPhone: textValue(row[indexOf("수령인 휴대폰")]),
         postalCode: textValue(row[indexOf("우편번호")]),
         address: textValue(row[indexOf("주소")]),
@@ -494,6 +492,7 @@ export function InvoiceConverter() {
   const [shippingError, setShippingError] = useState("");
   const [shippingResult, setShippingResult] =
     useState<ShippingMergeResult | null>(null);
+  const shippingRequestIdRef = useRef(0);
 
   const processFile = useCallback(async (file?: File) => {
     if (!file) return;
@@ -539,31 +538,55 @@ export function InvoiceConverter() {
     URL.revokeObjectURL(url);
   };
 
-  useEffect(() => {
-    if (!invoiceResultFile || !gmarketShippingFile) return;
-    let active = true;
-    setIsMergingShipping(true);
-    setShippingError("");
-    setShippingResult(null);
-    void fillShippingWorkbook(invoiceResultFile, gmarketShippingFile)
-      .then((mergedResult) => {
-        if (active) setShippingResult(mergedResult);
-      })
-      .catch((caught) => {
-        if (!active) return;
+  const processShippingFiles = useCallback(
+    async (nextInvoiceFile: File | null, nextGmarketFile: File | null) => {
+      const requestId = shippingRequestIdRef.current + 1;
+      shippingRequestIdRef.current = requestId;
+      setIsMergingShipping(Boolean(nextInvoiceFile && nextGmarketFile));
+      setShippingError("");
+      setShippingResult(null);
+      if (!nextInvoiceFile || !nextGmarketFile) return;
+
+      try {
+        const mergedResult = await fillShippingWorkbook(
+          nextInvoiceFile,
+          nextGmarketFile,
+        );
+        if (shippingRequestIdRef.current === requestId) {
+          setShippingResult(mergedResult);
+        }
+      } catch (caught) {
+        if (shippingRequestIdRef.current !== requestId) return;
         setShippingError(
           caught instanceof Error
             ? caught.message
             : "발송관리 파일을 처리하는 중 문제가 생겼습니다.",
         );
-      })
-      .finally(() => {
-        if (active) setIsMergingShipping(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [invoiceResultFile, gmarketShippingFile]);
+      } finally {
+        if (shippingRequestIdRef.current === requestId) {
+          setIsMergingShipping(false);
+        }
+      }
+    },
+    [],
+  );
+
+  const selectInvoiceResultFile = (file: File | null) => {
+    setInvoiceResultFile(file);
+    void processShippingFiles(file, gmarketShippingFile);
+  };
+
+  const selectGmarketShippingFile = (file: File | null) => {
+    setGmarketShippingFile(file);
+    void processShippingFiles(invoiceResultFile, file);
+  };
+
+  const resetShippingResult = () => {
+    shippingRequestIdRef.current += 1;
+    setIsMergingShipping(false);
+    setShippingError("");
+    setShippingResult(null);
+  };
 
   const downloadShippingResult = () => {
     if (!shippingResult) return;
@@ -722,7 +745,9 @@ export function InvoiceConverter() {
               type="file"
               accept=".xlsx,.xls"
               onChange={(event) => {
-                setInvoiceResultFile(event.target.files?.[0] ?? null);
+                const file = event.target.files?.[0] ?? null;
+                resetShippingResult();
+                selectInvoiceResultFile(file);
                 event.target.value = "";
               }}
             />
@@ -747,7 +772,9 @@ export function InvoiceConverter() {
               type="file"
               accept=".xlsx,.xls"
               onChange={(event) => {
-                setGmarketShippingFile(event.target.files?.[0] ?? null);
+                const file = event.target.files?.[0] ?? null;
+                resetShippingResult();
+                selectGmarketShippingFile(file);
                 event.target.value = "";
               }}
             />
