@@ -99,30 +99,8 @@ function outputValue(value: unknown) {
   return value as string | number;
 }
 
-function normalizedText(value: unknown) {
-  return textValue(value).replace(/\s+/g, " ").toLocaleLowerCase("ko-KR");
-}
-
-function normalizedPhone(value: unknown) {
-  return textValue(value).replace(/\D/g, "");
-}
-
 function normalizedOrderNumber(value: unknown) {
   return textValue(value).replace(/\.0$/, "");
-}
-
-function matchKey(
-  orderNumber: unknown,
-  productName: unknown,
-  recipientName: unknown,
-  phone: unknown,
-) {
-  return [
-    normalizedOrderNumber(orderNumber),
-    normalizedText(productName),
-    normalizedText(recipientName),
-    normalizedPhone(phone),
-  ].join("\u241f");
 }
 
 function headerIndex(headers: string[], candidates: string[], label: string) {
@@ -152,7 +130,129 @@ function normalizeCarrier(value: unknown) {
   return carrier;
 }
 
-async function fillShippingWorkbook(
+function xmlAttribute(tag: string, name: string) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return tag.match(new RegExp(`\\b${escapedName}="([^"]*)"`))?.[1] ?? "";
+}
+
+function firstWorksheetPath(files: Record<string, Uint8Array>) {
+  const decoder = new TextDecoder();
+  const workbookFile = files["xl/workbook.xml"];
+  const relationshipsFile = files["xl/_rels/workbook.xml.rels"];
+  if (!workbookFile || !relationshipsFile) {
+    throw new Error("2번 파일의 엑셀 내부 구조를 읽지 못했습니다.");
+  }
+
+  const workbookXml = decoder.decode(workbookFile);
+  const relationshipsXml = decoder.decode(relationshipsFile);
+  const firstSheetTag = workbookXml.match(/<sheet\b[^>]*>/)?.[0] ?? "";
+  const relationshipId = xmlAttribute(firstSheetTag, "r:id");
+  const relationshipTag = [...relationshipsXml.matchAll(/<Relationship\b[^>]*>/g)]
+    .map((match) => match[0])
+    .find((tag) => xmlAttribute(tag, "Id") === relationshipId);
+  const target = relationshipTag ? xmlAttribute(relationshipTag, "Target") : "";
+  if (!target) {
+    throw new Error("2번 파일의 첫 번째 시트를 찾지 못했습니다.");
+  }
+
+  return target.startsWith("/")
+    ? target.slice(1)
+    : `xl/${target.replace(/^\.?\//, "")}`;
+}
+
+function columnNumber(columnLetters: string) {
+  return [...columnLetters].reduce(
+    (total, letter) => total * 26 + letter.charCodeAt(0) - 64,
+    0,
+  );
+}
+
+function inlineStringCell(address: string, value: string, style = "") {
+  const escapedValue = value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const preserveSpace = /^\s|\s$/.test(value) ? ' xml:space="preserve"' : "";
+  const styleAttribute = style ? ` s="${style}"` : "";
+  return `<c r="${address}"${styleAttribute} t="inlineStr"><is><t${preserveSpace}>${escapedValue}</t></is></c>`;
+}
+
+function updateSheetCell(sheetXml: string, address: string, value: string) {
+  const rowNumber = address.match(/\d+$/)?.[0];
+  const columnLetters = address.match(/^[A-Z]+/)?.[0];
+  if (!rowNumber || !columnLetters) {
+    throw new Error("엑셀 셀 주소를 처리하지 못했습니다.");
+  }
+
+  const rowPattern = new RegExp(
+    `<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`,
+  );
+  const rowMatch = sheetXml.match(rowPattern);
+  if (!rowMatch) {
+    throw new Error(`2번 파일에서 ${rowNumber}행을 찾지 못했습니다.`);
+  }
+
+  const originalRow = rowMatch[0];
+  const cellPattern = new RegExp(
+    `<c\\b(?=[^>]*\\br="${address}")[^>]*(?:\\/\\s*>|>[\\s\\S]*?<\\/c>)`,
+  );
+  const existingCell = originalRow.match(cellPattern)?.[0];
+  const style = existingCell?.match(/\bs="([^"]*)"/)?.[1] ?? "";
+  const replacementCell = inlineStringCell(address, value, style);
+  let updatedRow: string;
+
+  if (existingCell) {
+    updatedRow = originalRow.replace(cellPattern, replacementCell);
+  } else {
+    const closingRowIndex = originalRow.lastIndexOf("</row>");
+    let insertAt = closingRowIndex;
+    const targetColumn = columnNumber(columnLetters);
+    const cellTags =
+      originalRow.match(
+        /<c\b(?=[^>]*\br="[A-Z]+\d+")[^>]*(?:\/\s*>|>[\s\S]*?<\/c>)/g,
+      ) ?? [];
+
+    for (const cellTag of cellTags) {
+      const existingAddress = xmlAttribute(cellTag, "r");
+      const existingColumnLetters = existingAddress.match(/^[A-Z]+/)?.[0];
+      if (
+        existingColumnLetters &&
+        columnNumber(existingColumnLetters) > targetColumn
+      ) {
+        insertAt = originalRow.indexOf(cellTag);
+        break;
+      }
+    }
+    updatedRow =
+      originalRow.slice(0, insertAt) +
+      replacementCell +
+      originalRow.slice(insertAt);
+  }
+
+  return sheetXml.replace(rowPattern, updatedRow);
+}
+
+async function patchWorkbookCells(
+  originalWorkbook: ArrayBuffer,
+  updates: Array<{ address: string; value: string }>,
+) {
+  const { strFromU8, strToU8, unzipSync, zipSync } = await import("fflate");
+  const files = unzipSync(new Uint8Array(originalWorkbook));
+  const sheetPath = firstWorksheetPath(files);
+  const sheetFile = files[sheetPath];
+  if (!sheetFile) {
+    throw new Error("2번 파일의 첫 번째 시트 내용을 찾지 못했습니다.");
+  }
+
+  let sheetXml = strFromU8(sheetFile);
+  for (const update of updates) {
+    sheetXml = updateSheetCell(sheetXml, update.address, update.value);
+  }
+  files[sheetPath] = strToU8(sheetXml);
+  return zipSync(files, { level: 6 });
+}
+
+export async function fillShippingWorkbook(
   invoiceResultFile: File,
   gmarketFile: File,
 ): Promise<ShippingMergeResult> {
@@ -164,31 +264,16 @@ async function fillShippingWorkbook(
     raw: true,
   });
   const invoiceSheetName = invoiceWorkbook.SheetNames[0];
-  if (!invoiceSheetName) throw new Error("송장 결과 파일에 시트가 없습니다.");
+  if (!invoiceSheetName) throw new Error("CJ 출력확정 파일에 시트가 없습니다.");
   const invoiceRows = XLSX.utils.sheet_to_json<unknown[]>(
     invoiceWorkbook.Sheets[invoiceSheetName],
     { header: 1, defval: "", raw: true },
   );
   const invoiceHeaders = (invoiceRows[0] ?? []).map(textValue);
-  const invoiceOrderIndex = headerIndex(
+  const invoiceCartIndex = headerIndex(
     invoiceHeaders,
-    ["고객주문번호", "주문번호"],
-    "주문번호",
-  );
-  const invoiceProductIndex = headerIndex(
-    invoiceHeaders,
-    ["품목명", "상품명"],
-    "상품명",
-  );
-  const invoiceRecipientIndex = headerIndex(
-    invoiceHeaders,
-    ["받는분성명", "수령인명", "수령자"],
-    "수령자",
-  );
-  const invoicePhoneIndex = headerIndex(
-    invoiceHeaders,
-    ["받는분전화번호", "수령인 휴대폰", "휴대폰"],
-    "휴대폰",
+    ["기타2", "장바구니번호(결제번호)"],
+    "기타2",
   );
   const invoiceTrackingIndex = headerIndex(
     invoiceHeaders,
@@ -209,12 +294,8 @@ async function fillShippingWorkbook(
   for (const row of invoiceRows.slice(1)) {
     const trackingNumber = textValue(row[invoiceTrackingIndex]);
     if (!trackingNumber) continue;
-    const key = matchKey(
-      row[invoiceOrderIndex],
-      row[invoiceProductIndex],
-      row[invoiceRecipientIndex],
-      row[invoicePhoneIndex],
-    );
+    const key = normalizedOrderNumber(row[invoiceCartIndex]);
+    if (!key) continue;
     const rawCarrier =
       invoiceCarrierIndex === undefined ? "" : row[invoiceCarrierIndex];
     const carrier = normalizeCarrier(rawCarrier);
@@ -222,16 +303,20 @@ async function fillShippingWorkbook(
     const existing = invoiceLookup.get(key);
     if (existing && existing.trackingNumber !== trackingNumber) {
       throw new Error(
-        "같은 주문 정보에 서로 다른 송장번호가 있어 결과 파일을 확인해 주세요.",
+        "같은 결제번호에 서로 다른 송장번호가 있어 CJ 송장 파일을 확인해 주세요.",
       );
     }
     invoiceLookup.set(key, { carrier, trackingNumber, usedDefaultCarrier });
   }
   if (!invoiceLookup.size) {
-    throw new Error("송장 결과 파일에서 입력된 송장번호를 찾지 못했습니다.");
+    throw new Error("CJ 출력확정 파일에서 운송장번호를 찾지 못했습니다.");
   }
 
-  const gmarketWorkbook = XLSX.read(await gmarketFile.arrayBuffer(), {
+  if (!gmarketFile.name.toLocaleLowerCase().endsWith(".xlsx")) {
+    throw new Error("2번 G마켓 발송관리 파일은 .xlsx 형식으로 올려주세요.");
+  }
+  const gmarketBuffer = await gmarketFile.arrayBuffer();
+  const gmarketWorkbook = XLSX.read(gmarketBuffer, {
     type: "array",
     cellDates: false,
     cellNF: true,
@@ -246,25 +331,10 @@ async function fillShippingWorkbook(
     raw: true,
   });
   const gmarketHeaders = (gmarketRows[0] ?? []).map(textValue);
-  const gmarketOrderIndex = headerIndex(
+  const gmarketCartIndex = headerIndex(
     gmarketHeaders,
-    ["주문번호"],
-    "주문번호",
-  );
-  const gmarketProductIndex = headerIndex(
-    gmarketHeaders,
-    ["상품명"],
-    "상품명",
-  );
-  const gmarketRecipientIndex = headerIndex(
-    gmarketHeaders,
-    ["수령인명"],
-    "수령자",
-  );
-  const gmarketPhoneIndex = headerIndex(
-    gmarketHeaders,
-    ["수령인 휴대폰"],
-    "휴대폰",
+    ["장바구니번호(결제번호)", "기타2"],
+    "장바구니번호(결제번호)",
   );
   const gmarketCarrierIndex = headerIndex(
     gmarketHeaders,
@@ -279,18 +349,14 @@ async function fillShippingWorkbook(
 
   let matchedCount = 0;
   let defaultCarrierCount = 0;
+  const cellUpdates: Array<{ address: string; value: string }> = [];
   const dataRows = gmarketRows.slice(1).filter((row) =>
     row.some((cell) => textValue(cell) !== ""),
   );
   for (let rowIndex = 1; rowIndex < gmarketRows.length; rowIndex += 1) {
     const row = gmarketRows[rowIndex];
     if (!row.some((cell) => textValue(cell) !== "")) continue;
-    const key = matchKey(
-      row[gmarketOrderIndex],
-      row[gmarketProductIndex],
-      row[gmarketRecipientIndex],
-      row[gmarketPhoneIndex],
-    );
+    const key = normalizedOrderNumber(row[gmarketCartIndex]);
     const match = invoiceLookup.get(key);
     if (!match) continue;
 
@@ -302,17 +368,10 @@ async function fillShippingWorkbook(
       r: rowIndex,
       c: gmarketTrackingIndex,
     });
-    gmarketSheet[carrierAddress] = {
-      ...(gmarketSheet[carrierAddress] ?? {}),
-      t: "s",
-      v: match.carrier,
-    };
-    gmarketSheet[trackingAddress] = {
-      ...(gmarketSheet[trackingAddress] ?? {}),
-      t: "s",
-      v: match.trackingNumber,
-      z: "@",
-    };
+    cellUpdates.push(
+      { address: carrierAddress, value: match.carrier },
+      { address: trackingAddress, value: match.trackingNumber },
+    );
     matchedCount += 1;
     if (match.usedDefaultCarrier) defaultCarrierCount += 1;
   }
@@ -324,14 +383,11 @@ async function fillShippingWorkbook(
   }
   if (!matchedCount) {
     throw new Error(
-      "주문번호·상품명·수령자·휴대폰이 모두 일치하는 주문을 찾지 못했습니다.",
+      "1번 파일의 기타2와 2번 파일의 장바구니번호(결제번호)가 일치하는 주문을 찾지 못했습니다.",
     );
   }
 
-  const output = XLSX.write(gmarketWorkbook, {
-    type: "array",
-    bookType: "xlsx",
-  });
+  const output = await patchWorkbookCells(gmarketBuffer, cellUpdates);
   return {
     fileName: `G마켓_발송처리_${fileStamp()}.xlsx`,
     matchedCount,
@@ -733,8 +789,8 @@ export function InvoiceConverter() {
           <div>
             <h2 id="shipping-tool-title">택배사·송장번호 자동 입력</h2>
             <p>
-              송장 결과 파일과 G마켓 발송관리 파일을 넣으면 일치하는 주문에
-              자동으로 입력됩니다.
+              CJ 출력확정 파일 1과 G마켓 발송관리 파일 2를 넣으면 결제번호가
+              같은 모든 주문에 자동으로 입력됩니다.
             </p>
           </div>
         </div>
@@ -752,9 +808,9 @@ export function InvoiceConverter() {
               }}
             />
             <span className="mini-upload-step">1</span>
-            <strong>CJ 송장 결과 파일</strong>
+            <strong>1. CJ 출력확정 파일</strong>
             <span className="mini-upload-name">
-              {invoiceResultFile?.name || "송장번호가 들어간 결과 엑셀"}
+              {invoiceResultFile?.name || "운송장번호가 들어간 1번 엑셀"}
             </span>
             <span className="mini-upload-action">
               {invoiceResultFile ? "파일 다시 선택" : "파일 선택"}
@@ -770,7 +826,7 @@ export function InvoiceConverter() {
           >
             <input
               type="file"
-              accept=".xlsx,.xls"
+              accept=".xlsx"
               onChange={(event) => {
                 const file = event.target.files?.[0] ?? null;
                 resetShippingResult();
@@ -779,9 +835,10 @@ export function InvoiceConverter() {
               }}
             />
             <span className="mini-upload-step">2</span>
-            <strong>G마켓 발송관리 파일</strong>
+            <strong>2. G마켓 발송관리 파일</strong>
             <span className="mini-upload-name">
-              {gmarketShippingFile?.name || "발송관리 엑셀 원본"}
+              {gmarketShippingFile?.name ||
+                "택배사·송장번호를 채울 2번 XLSX 파일"}
             </span>
             <span className="mini-upload-action">
               {gmarketShippingFile ? "파일 다시 선택" : "파일 선택"}

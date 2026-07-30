@@ -47,6 +47,6 @@ test("renders accessible upload controls and privacy notice", async () => {
   assert.match(html, /role="button"/);
   assert.match(html, /tabindex="0"/);
   assert.match(html, /파일은 서버에 저장되지 않아요/);
-  assert.match(html, /CJ 송장 결과 파일/);
+  assert.match(html, /CJ 출력확정 파일/);
   assert.match(html, /G마켓 발송관리 파일/);
 });
