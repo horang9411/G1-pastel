@@ -1,6 +1,13 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useCallback, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  DragEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 type ConvertedRow = {
   orderNumber: string | number;
@@ -22,6 +29,14 @@ type ConversionResult = {
   fileName: string;
   rowCount: number;
   preview: ConvertedRow[];
+  blob: Blob;
+};
+
+type ShippingMergeResult = {
+  fileName: string;
+  matchedCount: number;
+  totalCount: number;
+  defaultCarrierCount: number;
   blob: Blob;
 };
 
@@ -85,8 +100,253 @@ function outputValue(value: unknown) {
   return value as string | number;
 }
 
+function normalizedText(value: unknown) {
+  return textValue(value).replace(/\s+/g, " ").toLocaleLowerCase("ko-KR");
+}
+
+function normalizedPhone(value: unknown) {
+  return textValue(value).replace(/\D/g, "");
+}
+
+function normalizedOrderNumber(value: unknown) {
+  return textValue(value).replace(/\.0$/, "");
+}
+
+function matchKey(
+  orderNumber: unknown,
+  productName: unknown,
+  recipientName: unknown,
+  phone: unknown,
+) {
+  return [
+    normalizedOrderNumber(orderNumber),
+    normalizedText(productName),
+    normalizedText(recipientName),
+    normalizedPhone(phone),
+  ].join("\u241f");
+}
+
+function headerIndex(headers: string[], candidates: string[], label: string) {
+  const index = candidates
+    .map((candidate) => headers.indexOf(candidate))
+    .find((candidateIndex) => candidateIndex >= 0);
+  if (index === undefined) {
+    throw new Error(`${label} 열을 찾지 못했습니다.`);
+  }
+  return index;
+}
+
+function optionalHeaderIndex(headers: string[], candidates: string[]) {
+  return candidates
+    .map((candidate) => headers.indexOf(candidate))
+    .find((candidateIndex) => candidateIndex >= 0);
+}
+
+function normalizeCarrier(value: unknown) {
+  const carrier = textValue(value);
+  const compact = carrier.replace(/\s+/g, "").toLocaleLowerCase("ko-KR");
+  if (!carrier || /cj|씨제이|대한통운/.test(compact)) return "대한통운";
+  if (/롯데/.test(compact)) return "롯데택배";
+  if (/한진/.test(compact)) return "한진택배";
+  if (/로젠/.test(compact)) return "로젠택배";
+  if (/우체국/.test(compact)) return "우체국택배";
+  return carrier;
+}
+
+async function fillShippingWorkbook(
+  invoiceResultFile: File,
+  gmarketFile: File,
+): Promise<ShippingMergeResult> {
+  const XLSXModule = await import("xlsx-js-style");
+  const XLSX = XLSXModule.default ?? XLSXModule;
+  const invoiceWorkbook = XLSX.read(await invoiceResultFile.arrayBuffer(), {
+    type: "array",
+    cellDates: true,
+    raw: true,
+  });
+  const invoiceSheetName = invoiceWorkbook.SheetNames[0];
+  if (!invoiceSheetName) throw new Error("송장 결과 파일에 시트가 없습니다.");
+  const invoiceRows = XLSX.utils.sheet_to_json<unknown[]>(
+    invoiceWorkbook.Sheets[invoiceSheetName],
+    { header: 1, defval: "", raw: true },
+  );
+  const invoiceHeaders = (invoiceRows[0] ?? []).map(textValue);
+  const invoiceOrderIndex = headerIndex(
+    invoiceHeaders,
+    ["고객주문번호", "주문번호"],
+    "주문번호",
+  );
+  const invoiceProductIndex = headerIndex(
+    invoiceHeaders,
+    ["품목명", "상품명"],
+    "상품명",
+  );
+  const invoiceRecipientIndex = headerIndex(
+    invoiceHeaders,
+    ["받는분성명", "수령인명", "수령자"],
+    "수령자",
+  );
+  const invoicePhoneIndex = headerIndex(
+    invoiceHeaders,
+    ["받는분전화번호", "수령인 휴대폰", "휴대폰"],
+    "휴대폰",
+  );
+  const invoiceTrackingIndex = headerIndex(
+    invoiceHeaders,
+    ["운송장번호", "송장번호", "운송장 번호", "등기번호"],
+    "송장번호",
+  );
+  const invoiceCarrierIndex = optionalHeaderIndex(invoiceHeaders, [
+    "택배사",
+    "택배사명",
+    "택배사명(발송방법)",
+    "배송사",
+  ]);
+
+  const invoiceLookup = new Map<
+    string,
+    { carrier: string; trackingNumber: string; usedDefaultCarrier: boolean }
+  >();
+  for (const row of invoiceRows.slice(1)) {
+    const trackingNumber = textValue(row[invoiceTrackingIndex]);
+    if (!trackingNumber) continue;
+    const key = matchKey(
+      row[invoiceOrderIndex],
+      row[invoiceProductIndex],
+      row[invoiceRecipientIndex],
+      row[invoicePhoneIndex],
+    );
+    const rawCarrier =
+      invoiceCarrierIndex === undefined ? "" : row[invoiceCarrierIndex];
+    const carrier = normalizeCarrier(rawCarrier);
+    const usedDefaultCarrier = textValue(rawCarrier) === "";
+    const existing = invoiceLookup.get(key);
+    if (existing && existing.trackingNumber !== trackingNumber) {
+      throw new Error(
+        "같은 주문 정보에 서로 다른 송장번호가 있어 결과 파일을 확인해 주세요.",
+      );
+    }
+    invoiceLookup.set(key, { carrier, trackingNumber, usedDefaultCarrier });
+  }
+  if (!invoiceLookup.size) {
+    throw new Error("송장 결과 파일에서 입력된 송장번호를 찾지 못했습니다.");
+  }
+
+  const gmarketWorkbook = XLSX.read(await gmarketFile.arrayBuffer(), {
+    type: "array",
+    cellDates: false,
+    cellNF: true,
+    raw: true,
+  });
+  const gmarketSheetName = gmarketWorkbook.SheetNames[0];
+  if (!gmarketSheetName) throw new Error("G마켓 파일에 시트가 없습니다.");
+  const gmarketSheet = gmarketWorkbook.Sheets[gmarketSheetName];
+  const gmarketRows = XLSX.utils.sheet_to_json<unknown[]>(gmarketSheet, {
+    header: 1,
+    defval: "",
+    raw: true,
+  });
+  const gmarketHeaders = (gmarketRows[0] ?? []).map(textValue);
+  const gmarketOrderIndex = headerIndex(
+    gmarketHeaders,
+    ["주문번호"],
+    "주문번호",
+  );
+  const gmarketProductIndex = headerIndex(
+    gmarketHeaders,
+    ["상품명"],
+    "상품명",
+  );
+  const gmarketRecipientIndex = headerIndex(
+    gmarketHeaders,
+    ["수령인명"],
+    "수령자",
+  );
+  const gmarketPhoneIndex = headerIndex(
+    gmarketHeaders,
+    ["수령인 휴대폰"],
+    "휴대폰",
+  );
+  const gmarketCarrierIndex = headerIndex(
+    gmarketHeaders,
+    ["택배사명(발송방법)"],
+    "택배사",
+  );
+  const gmarketTrackingIndex = headerIndex(
+    gmarketHeaders,
+    ["송장번호"],
+    "송장번호",
+  );
+
+  let matchedCount = 0;
+  let defaultCarrierCount = 0;
+  const dataRows = gmarketRows.slice(1).filter((row) =>
+    row.some((cell) => textValue(cell) !== ""),
+  );
+  for (let rowIndex = 1; rowIndex < gmarketRows.length; rowIndex += 1) {
+    const row = gmarketRows[rowIndex];
+    if (!row.some((cell) => textValue(cell) !== "")) continue;
+    const key = matchKey(
+      row[gmarketOrderIndex],
+      row[gmarketProductIndex],
+      row[gmarketRecipientIndex],
+      row[gmarketPhoneIndex],
+    );
+    const match = invoiceLookup.get(key);
+    if (!match) continue;
+
+    const carrierAddress = XLSX.utils.encode_cell({
+      r: rowIndex,
+      c: gmarketCarrierIndex,
+    });
+    const trackingAddress = XLSX.utils.encode_cell({
+      r: rowIndex,
+      c: gmarketTrackingIndex,
+    });
+    gmarketSheet[carrierAddress] = {
+      ...(gmarketSheet[carrierAddress] ?? {}),
+      t: "s",
+      v: match.carrier,
+    };
+    gmarketSheet[trackingAddress] = {
+      ...(gmarketSheet[trackingAddress] ?? {}),
+      t: "s",
+      v: match.trackingNumber,
+      z: "@",
+    };
+    matchedCount += 1;
+    if (match.usedDefaultCarrier) defaultCarrierCount += 1;
+  }
+
+  if (!dataRows.length) {
+    throw new Error(
+      "G마켓 발송관리 파일에 주문 데이터가 없습니다. 주문이 포함된 파일을 넣어주세요.",
+    );
+  }
+  if (!matchedCount) {
+    throw new Error(
+      "주문번호·상품명·수령자·휴대폰이 모두 일치하는 주문을 찾지 못했습니다.",
+    );
+  }
+
+  const output = XLSX.write(gmarketWorkbook, {
+    type: "array",
+    bookType: "xlsx",
+  });
+  return {
+    fileName: `G마켓_발송처리_${fileStamp()}.xlsx`,
+    matchedCount,
+    totalCount: dataRows.length,
+    defaultCarrierCount,
+    blob: new Blob([output], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }),
+  };
+}
+
 async function convertWorkbook(file: File): Promise<ConversionResult> {
-  const XLSX = await import("xlsx-js-style");
+  const XLSXModule = await import("xlsx-js-style");
+  const XLSX = XLSXModule.default ?? XLSXModule;
   const source = XLSX.read(await file.arrayBuffer(), {
     type: "array",
     cellDates: true,
@@ -226,6 +486,14 @@ export function InvoiceConverter() {
   const [selectedName, setSelectedName] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<ConversionResult | null>(null);
+  const [invoiceResultFile, setInvoiceResultFile] = useState<File | null>(null);
+  const [gmarketShippingFile, setGmarketShippingFile] = useState<File | null>(
+    null,
+  );
+  const [isMergingShipping, setIsMergingShipping] = useState(false);
+  const [shippingError, setShippingError] = useState("");
+  const [shippingResult, setShippingResult] =
+    useState<ShippingMergeResult | null>(null);
 
   const processFile = useCallback(async (file?: File) => {
     if (!file) return;
@@ -271,12 +539,48 @@ export function InvoiceConverter() {
     URL.revokeObjectURL(url);
   };
 
+  useEffect(() => {
+    if (!invoiceResultFile || !gmarketShippingFile) return;
+    let active = true;
+    setIsMergingShipping(true);
+    setShippingError("");
+    setShippingResult(null);
+    void fillShippingWorkbook(invoiceResultFile, gmarketShippingFile)
+      .then((mergedResult) => {
+        if (active) setShippingResult(mergedResult);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setShippingError(
+          caught instanceof Error
+            ? caught.message
+            : "발송관리 파일을 처리하는 중 문제가 생겼습니다.",
+        );
+      })
+      .finally(() => {
+        if (active) setIsMergingShipping(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [invoiceResultFile, gmarketShippingFile]);
+
+  const downloadShippingResult = () => {
+    if (!shippingResult) return;
+    const url = URL.createObjectURL(shippingResult.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = shippingResult.fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <main>
       <header className="topbar">
         <a className="brand" href="#" aria-label="처음으로">
           <span className="brand-mark">G</span>
-          <span>송장 딸깍</span>
+          <span>G마켓 - CJ처리기</span>
         </a>
         <span className="privacy-pill">
           <span className="privacy-dot" />
@@ -285,21 +589,11 @@ export function InvoiceConverter() {
       </header>
 
       <section className="hero">
-        <div className="eyebrow">
-          <span>G마켓 주문서</span>
-          <span className="eyebrow-arrow">→</span>
-          <span>송장 출력 양식</span>
-        </div>
         <h1>
           G마켓 송장 입,출력용
           <br />
           <span>딸깍</span>
         </h1>
-        <p className="hero-copy">
-          복잡한 열 정리는 이제 그만.
-          <br className="mobile-break" /> 주문 엑셀을 올리면 송장용 파일이
-          바로 완성됩니다.
-        </p>
       </section>
 
       <section className="workspace" aria-label="엑셀 변환">
@@ -344,9 +638,7 @@ export function InvoiceConverter() {
             </>
           ) : (
             <>
-              <h2>
-                {selectedName || "1-1 형태의 엑셀을 여기에 놓아주세요"}
-              </h2>
+              <h2>{selectedName || "G마켓 파일 업로드"}</h2>
               <p>
                 파일을 끌어다 놓거나{" "}
                 <span className="text-link">내 컴퓨터에서 선택</span>
@@ -412,34 +704,109 @@ export function InvoiceConverter() {
         )}
       </section>
 
-      <section className="how-it-works" aria-label="이용 방법">
-        <div className="section-heading">
-          <span>이용 방법</span>
-          <h2>세 단계면 끝나요</h2>
+      <section className="shipping-tool" aria-labelledby="shipping-tool-title">
+        <div className="shipping-tool-heading">
+          <span className="tool-number">02</span>
+          <div>
+            <h2 id="shipping-tool-title">택배사·송장번호 자동 입력</h2>
+            <p>
+              송장 결과 파일과 G마켓 발송관리 파일을 넣으면 일치하는 주문에
+              자동으로 입력됩니다.
+            </p>
+          </div>
         </div>
-        <ol>
-          <li>
-            <span className="step-number">01</span>
-            <strong>주문서 올리기</strong>
-            <p>G마켓에서 내려받은 원본 주문 엑셀을 선택해요.</p>
-          </li>
-          <li>
-            <span className="step-number">02</span>
-            <strong>자동 변환</strong>
-            <p>필요한 13개 열만 정확한 송장 순서로 정리해요.</p>
-          </li>
-          <li>
-            <span className="step-number">03</span>
-            <strong>결과 받기</strong>
-            <p>완성된 송장 출력용 엑셀을 바로 내려받아요.</p>
-          </li>
-        </ol>
+
+        <div className="shipping-upload-grid">
+          <label className={`mini-upload ${invoiceResultFile ? "is-ready" : ""}`}>
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={(event) => {
+                setInvoiceResultFile(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
+            <span className="mini-upload-step">1</span>
+            <strong>CJ 송장 결과 파일</strong>
+            <span className="mini-upload-name">
+              {invoiceResultFile?.name || "송장번호가 들어간 결과 엑셀"}
+            </span>
+            <span className="mini-upload-action">
+              {invoiceResultFile ? "파일 다시 선택" : "파일 선택"}
+            </span>
+          </label>
+
+          <span className="merge-arrow" aria-hidden="true">
+            +
+          </span>
+
+          <label
+            className={`mini-upload ${gmarketShippingFile ? "is-ready" : ""}`}
+          >
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={(event) => {
+                setGmarketShippingFile(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
+            <span className="mini-upload-step">2</span>
+            <strong>G마켓 발송관리 파일</strong>
+            <span className="mini-upload-name">
+              {gmarketShippingFile?.name || "발송관리 엑셀 원본"}
+            </span>
+            <span className="mini-upload-action">
+              {gmarketShippingFile ? "파일 다시 선택" : "파일 선택"}
+            </span>
+          </label>
+        </div>
+
+        {isMergingShipping && (
+          <div className="shipping-status" role="status">
+            <span className="status-spinner" />
+            주문 정보를 대조하고 있어요...
+          </div>
+        )}
+
+        {shippingError && (
+          <div className="alert error-alert shipping-alert" role="alert">
+            <span>!</span>
+            <div>
+              <strong>두 파일을 확인해 주세요</strong>
+              <p>{shippingError}</p>
+            </div>
+          </div>
+        )}
+
+        {shippingResult && (
+          <div className="shipping-success">
+            <div>
+              <span className="shipping-success-mark">✓</span>
+              <div>
+                <strong>
+                  {shippingResult.totalCount.toLocaleString("ko-KR")}건 중{" "}
+                  {shippingResult.matchedCount.toLocaleString("ko-KR")}건 입력
+                  완료
+                </strong>
+                <p>
+                  택배사와 송장번호가 입력된 G마켓 파일을 내려받으세요.
+                  {shippingResult.defaultCarrierCount > 0 &&
+                    ` 택배사 정보가 없던 ${shippingResult.defaultCarrierCount.toLocaleString(
+                      "ko-KR",
+                    )}건은 대한통운으로 입력했습니다.`}
+                </p>
+              </div>
+            </div>
+            <button onClick={downloadShippingResult}>
+              완성 파일 내려받기
+              <span aria-hidden="true">↓</span>
+            </button>
+          </div>
+        )}
       </section>
 
-      <footer>
-        <p>G마켓 송장 입,출력용 딸깍</p>
-        <span>개인정보가 담긴 파일은 내 브라우저 안에서만 처리됩니다.</span>
-      </footer>
+      <p className="made-by">made by 영중팀장</p>
     </main>
   );
 }
