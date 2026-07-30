@@ -615,7 +615,7 @@ export function InvoiceConverter() {
         <h1>
           G마켓 송장 입,출력용
           <br />
-          <span>딸깍</span>
+          <span>파스텔 전용 처리기</span>
         </h1>
       </section>
 

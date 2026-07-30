@@ -31,6 +31,7 @@ test("server-renders the finished Gmarket invoice service", async () => {
   assert.match(html, /<html lang="ko">/i);
   assert.match(html, /<title>G마켓 송장 입,출력용 딸깍<\/title>/i);
   assert.match(html, /G마켓 - CJ처리기/);
+  assert.match(html, /파스텔 전용 처리기/);
   assert.match(html, /G마켓 파일 업로드/);
   assert.match(html, /택배사·송장번호 자동 입력/);
   assert.match(html, /made by 영중팀장/);
