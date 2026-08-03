@@ -122,7 +122,7 @@ function optionalHeaderIndex(headers: string[], candidates: string[]) {
 function normalizeCarrier(value: unknown) {
   const carrier = textValue(value);
   const compact = carrier.replace(/\s+/g, "").toLocaleLowerCase("ko-KR");
-  if (!carrier || /cj|씨제이|대한통운/.test(compact)) return "대한통운";
+  if (!carrier || /cj|씨제이|대한통운/.test(compact)) return "CJ택배";
   if (/롯데/.test(compact)) return "롯데택배";
   if (/한진/.test(compact)) return "한진택배";
   if (/로젠/.test(compact)) return "로젠택배";
@@ -145,7 +145,8 @@ function firstWorksheetPath(files: Record<string, Uint8Array>) {
 
   const workbookXml = decoder.decode(workbookFile);
   const relationshipsXml = decoder.decode(relationshipsFile);
-  const firstSheetTag = workbookXml.match(/<sheet\b[^>]*>/)?.[0] ?? "";
+  const firstSheetTag =
+    workbookXml.match(/<(?:\w+:)?sheet\b[^>]*>/)?.[0] ?? "";
   const relationshipId = xmlAttribute(firstSheetTag, "r:id");
   const relationshipTag = [...relationshipsXml.matchAll(/<Relationship\b[^>]*>/g)]
     .map((match) => match[0])
@@ -167,14 +168,19 @@ function columnNumber(columnLetters: string) {
   );
 }
 
-function inlineStringCell(address: string, value: string, style = "") {
+function inlineStringCell(
+  address: string,
+  value: string,
+  style = "",
+  namespacePrefix = "",
+) {
   const escapedValue = value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
   const preserveSpace = /^\s|\s$/.test(value) ? ' xml:space="preserve"' : "";
   const styleAttribute = style ? ` s="${style}"` : "";
-  return `<c r="${address}"${styleAttribute} t="inlineStr"><is><t${preserveSpace}>${escapedValue}</t></is></c>`;
+  return `<${namespacePrefix}c r="${address}"${styleAttribute} t="inlineStr"><${namespacePrefix}is><${namespacePrefix}t${preserveSpace}>${escapedValue}</${namespacePrefix}t></${namespacePrefix}is></${namespacePrefix}c>`;
 }
 
 function updateSheetCell(sheetXml: string, address: string, value: string) {
@@ -185,7 +191,7 @@ function updateSheetCell(sheetXml: string, address: string, value: string) {
   }
 
   const rowPattern = new RegExp(
-    `<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`,
+    `<(?:\\w+:)?row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/(?:\\w+:)?row>`,
   );
   const rowMatch = sheetXml.match(rowPattern);
   if (!rowMatch) {
@@ -193,23 +199,32 @@ function updateSheetCell(sheetXml: string, address: string, value: string) {
   }
 
   const originalRow = rowMatch[0];
+  const namespacePrefix =
+    originalRow.match(/^<(\w+:)?row\b/)?.[1] ?? "";
   const cellPattern = new RegExp(
-    `<c\\b(?=[^>]*\\br="${address}")[^>]*(?:\\/\\s*>|>[\\s\\S]*?<\\/c>)`,
+    `<(?:\\w+:)?c\\b(?=[^>]*\\br="${address}")(?:[^>]*\\/\\s*>|[^>]*>[\\s\\S]*?<\\/(?:\\w+:)?c>)`,
   );
   const existingCell = originalRow.match(cellPattern)?.[0];
   const style = existingCell?.match(/\bs="([^"]*)"/)?.[1] ?? "";
-  const replacementCell = inlineStringCell(address, value, style);
+  const replacementCell = inlineStringCell(
+    address,
+    value,
+    style,
+    namespacePrefix,
+  );
   let updatedRow: string;
 
   if (existingCell) {
     updatedRow = originalRow.replace(cellPattern, replacementCell);
   } else {
-    const closingRowIndex = originalRow.lastIndexOf("</row>");
+    const closingRowIndex = originalRow.lastIndexOf(
+      `</${namespacePrefix}row>`,
+    );
     let insertAt = closingRowIndex;
     const targetColumn = columnNumber(columnLetters);
     const cellTags =
       originalRow.match(
-        /<c\b(?=[^>]*\br="[A-Z]+\d+")[^>]*(?:\/\s*>|>[\s\S]*?<\/c>)/g,
+        /<(?:\w+:)?c\b(?=[^>]*\br="[A-Z]+\d+")(?:[^>]*\/\s*>|[^>]*>[\s\S]*?<\/(?:\w+:)?c>)/g,
       ) ?? [];
 
     for (const cellTag of cellTags) {
@@ -878,7 +893,7 @@ export function InvoiceConverter() {
                   {shippingResult.defaultCarrierCount > 0 &&
                     ` 택배사 정보가 없던 ${shippingResult.defaultCarrierCount.toLocaleString(
                       "ko-KR",
-                    )}건은 대한통운으로 입력했습니다.`}
+                    )}건은 CJ택배로 입력했습니다.`}
                 </p>
               </div>
             </div>
