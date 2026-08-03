@@ -30,7 +30,7 @@ test("server-renders the finished Gmarket invoice service", async () => {
   const html = await response.text();
   assert.match(html, /<html lang="ko">/i);
   assert.match(html, /<title>G마켓 송장 입,출력용 딸깍<\/title>/i);
-  assert.match(html, /G마켓 - CJ처리기/);
+  assert.doesNotMatch(html, /G마켓 - CJ처리기/);
   assert.match(html, /파스텔 전용 처리기/);
   assert.match(html, /G마켓 파일 업로드/);
   assert.match(html, /택배사·송장번호 자동 입력/);
@@ -46,7 +46,7 @@ test("renders accessible upload controls and privacy notice", async () => {
   assert.match(html, /aria-label="G마켓 주문 엑셀 업로드"/);
   assert.match(html, /role="button"/);
   assert.match(html, /tabindex="0"/);
-  assert.match(html, /파일은 서버에 저장되지 않아요/);
+  assert.doesNotMatch(html, /파일은 서버에 저장되지 않아요/);
   assert.match(html, /CJ 출력확정 파일/);
   assert.match(html, /G마켓 발송관리 파일/);
 });

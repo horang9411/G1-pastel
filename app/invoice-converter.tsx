@@ -671,17 +671,6 @@ export function InvoiceConverter() {
 
   return (
     <main>
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="처음으로">
-          <span className="brand-mark">G</span>
-          <span>G마켓 - CJ처리기</span>
-        </a>
-        <span className="privacy-pill">
-          <span className="privacy-dot" />
-          파일은 서버에 저장되지 않아요
-        </span>
-      </header>
-
       <section className="hero">
         <h1>
           G마켓 송장 입,출력용
@@ -690,7 +679,7 @@ export function InvoiceConverter() {
         </h1>
       </section>
 
-      <section className="workspace" aria-label="엑셀 변환">
+      <section className="workspace" id="excel-tools" aria-label="엑셀 변환">
         <div
           className={`dropzone ${isDragging ? "is-dragging" : ""} ${
             result ? "has-file" : ""

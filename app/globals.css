@@ -16,15 +16,13 @@
 }
 
 html {
-  background: var(--cream);
+  background: #fff;
   scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 14% 3%, rgba(0, 168, 79, 0.08), transparent 25rem),
-    var(--cream);
+  background: #fff;
   color: var(--ink);
   font-family:
     Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif;
@@ -99,7 +97,7 @@ button,
 
 .hero {
   width: min(920px, calc(100% - 40px));
-  margin: 76px auto 43px;
+  margin: 76px auto 50px;
   text-align: center;
 }
 
@@ -112,19 +110,12 @@ button,
 }
 
 .hero h1 span {
-  color: var(--green);
+  color: #6f8878;
   position: relative;
 }
 
 .hero h1 span::after {
-  content: "";
-  position: absolute;
-  right: -12px;
-  bottom: 6px;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #ffb200;
+  display: none;
 }
 
 .workspace {
@@ -139,12 +130,12 @@ button,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  border: 1.5px dashed #a8beb0;
+  border: 1.5px dashed #bcc8bd;
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.86);
+  background: #eef2ed;
   box-shadow:
-    0 22px 70px rgba(26, 55, 38, 0.08),
-    inset 0 0 0 7px rgba(0, 168, 79, 0.025);
+    0 20px 55px rgba(51, 69, 57, 0.07),
+    inset 0 0 0 7px rgba(112, 139, 119, 0.035);
   cursor: pointer;
   outline: none;
   transition:
@@ -158,11 +149,11 @@ button,
 .dropzone:focus-visible,
 .dropzone.is-dragging {
   transform: translateY(-2px);
-  border-color: var(--green);
-  background: #fbfffc;
+  border-color: #8fa394;
+  background: #e8eee8;
   box-shadow:
-    0 26px 80px rgba(20, 77, 43, 0.12),
-    0 0 0 5px rgba(0, 168, 79, 0.08);
+    0 23px 62px rgba(51, 69, 57, 0.1),
+    0 0 0 5px rgba(112, 139, 119, 0.09);
 }
 
 .file-icon {
@@ -173,12 +164,12 @@ button,
   place-items: center;
   position: relative;
   border-radius: 13px;
-  background: linear-gradient(145deg, #13b85d, #008e43);
+  background: linear-gradient(145deg, #879e8e, #667d6d);
   color: white;
   font-family: Arial, sans-serif;
   font-size: 30px;
   font-weight: 900;
-  box-shadow: 0 16px 30px rgba(0, 168, 79, 0.23);
+  box-shadow: 0 14px 27px rgba(82, 105, 89, 0.2);
 }
 
 .file-icon::before {
@@ -231,7 +222,7 @@ button,
   margin-top: 22px;
   padding: 6px 9px;
   border-radius: 7px;
-  background: #f0f3f1;
+  background: #dfe6df;
   color: #8c9790;
   font-family: Arial, sans-serif;
   font-size: 10px;
@@ -699,6 +690,47 @@ td {
   font-weight: 650;
   letter-spacing: 0.01em;
   text-align: center;
+}
+
+/* Calm white layout with low-saturation pastel upload surfaces. */
+.shipping-tool {
+  border-color: #e1e5df;
+  background: #fbfcfa;
+  box-shadow: 0 16px 46px rgba(52, 67, 57, 0.05);
+}
+
+.mini-upload {
+  border-color: #c7cec5;
+  background: #f0f2ed;
+}
+
+.mini-upload:hover,
+.mini-upload:focus-within {
+  border-color: #93a396;
+  background: #e9eee8;
+}
+
+.mini-upload.is-ready {
+  border-color: #aebdaf;
+  background: #e8eee8;
+}
+
+.mini-upload-step {
+  background: #dfe5de;
+  color: #667368;
+}
+
+.mini-upload.is-ready .mini-upload-step {
+  background: #829788;
+}
+
+.mini-upload-action {
+  background: #e0e5de;
+}
+
+.mini-upload.is-ready .mini-upload-action {
+  background: #d7e2d8;
+  color: #536b5b;
 }
 
 @media (max-width: 720px) {
