@@ -673,9 +673,9 @@ export function InvoiceConverter() {
     <main>
       <section className="hero">
         <h1>
-          G마켓 송장 입,출력용
+          Gmarket / Pastelcraft
           <br />
-          <span>파스텔 전용 처리기</span>
+          <span>Invoice Machine</span>
         </h1>
       </section>
 
